@@ -3,11 +3,13 @@ package guardian
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
+	"github.com/google/gopacket/pcapgo"
 )
 
 func protocolLabel(packet gopacket.Packet) string {
@@ -33,9 +35,16 @@ func protocolLabel(packet gopacket.Packet) string {
 }
 
 func StartGuardian() {
+
+	file, err := os.Create("guardian_log.pcap")
+	if err != nil {
+		log.Fatal("Erro ao criar PCAP:", err)
+	}
+	defer file.Close()
+
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Erro ao encontrar dispositivos", err)
 	}
 
 	fmt.Println("Interfaces encontradas:")
@@ -54,21 +63,33 @@ func StartGuardian() {
 	}
 	defer handle.Close()
 
-	filter := "tcp"
-	if err := handle.SetBPFFilter(filter); err != nil {
-		log.Fatal(err)
+	w := pcapgo.NewWriter(file)
+	if err := w.WriteFileHeader(uint32(snapshotLen), handle.LinkType()); err != nil {
+		log.Fatal("Erro ao escrever cabeçalho PCAP:", err)
 	}
 
-	fmt.Printf("\n[GALILEU] Sniffer ativo. Monitorando tráfego na porta 8080...\n")
+	filter := "tcp"
+	if err := handle.SetBPFFilter(filter); err != nil {
+		log.Fatal("Erro ao definir filtro BPF", err)
+	}
+
+	fmt.Printf("\n[GALILEU] Sniffer ativo. Monitorando tráfegos TCP/HTTP...\n")
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
+		label := protocolLabel(packet)
 		if len(packet.Data()) > 0 {
-			label := protocolLabel(packet)
 			fmt.Printf("[%s] Pacote capturado! Tamanho: %d bytes\n", label, len(packet.Data()))
 			fmt.Printf("[%s] Dados: %s\n", label, string(packet.Data()))
 		}
+
+		if err := w.WritePacket(packet.Metadata().CaptureInfo, packet.Data()); err != nil {
+			log.Println("Erro ao escrever pacote no PCAP:", err)
+			continue
+		}
+		log.Printf("[%s] Pacote salvo no PCAP. Tamanho: %d bytes\n", label, len(packet.Data()))
 	}
+
 }
 
 
