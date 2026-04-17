@@ -1,9 +1,9 @@
 package main
 
 import (
-    "Galileu/internal/proxy" // Importa o pacote do proxy
+    "Galileu/internal/guardian" 
 )
 
 func main() {
-    proxy.StartProxy() 
+    guardian.StartGuardian() 
 }
