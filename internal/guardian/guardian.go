@@ -21,6 +21,54 @@ var bodyPool = sync.Pool{
 	},
 }
 
+type LogRequest struct {
+	Host        string
+	Path        string
+	Method      string
+	Redacted    bool
+	PatternType string
+}
+
+type LogWorkerPool struct {
+	logChan chan LogRequest
+	workers int
+	wg      sync.WaitGroup
+}
+
+func NewLogWorkerPool(numWorkers int, channelBuffer int) *LogWorkerPool {
+	return &LogWorkerPool{
+		logChan: make(chan LogRequest, channelBuffer),
+		workers: numWorkers,
+	}
+}
+
+func (p *LogWorkerPool) Start() {
+	for i := 0; i < p.workers; i++ {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			for logReq := range p.logChan {
+				LogRequest(logReq.Host, logReq.Path, logReq.Method, logReq.Redacted, logReq.PatternType)
+			}
+		}()
+	}
+}
+
+func (p *LogWorkerPool) Submit(logReq LogRequest) {
+	select {
+	case p.logChan <- logReq:
+	default:
+		fmt.Printf("[GALILEU] Aviso: fila de logging cheia, descartando log\n")
+	}
+}
+
+func (p *LogWorkerPool) Shutdown() {
+	close(p.logChan)
+	p.wg.Wait()
+}
+
+var logWorkerPool *LogWorkerPool
+
 func StartGuardian() {
 	proxy := goproxy.NewProxyHttpServer()
 
@@ -40,6 +88,11 @@ func StartGuardian() {
 	}
 	defer CloseAuditLogger()
 
+	// Inicializar pool de workers para logging (4 workers, buffer de 100)
+	logWorkerPool = NewLogWorkerPool(4, 100)
+	logWorkerPool.Start()
+	defer logWorkerPool.Shutdown()
+
 	analyzer := NewAnalyzer()
 
 	targetHosts := []string{
@@ -56,20 +109,32 @@ func StartGuardian() {
 			return r, nil
 		}
 
-		body, err := io.ReadAll(r.Body)
+		bufRaw := bodyPool.Get().([]byte)
+		buf := bufRaw[:0]
+		defer bodyPool.Put(buf)
+
+		body := bytes.NewBuffer(buf)
+		_, err := io.Copy(body, r.Body)
 		if err != nil {
 			return r, nil
 		}
+		bodyBytes := body.Bytes()
 
-		found, cleanBody := analyzer.Analyze(body)
+		found, cleanBody := analyzer.Analyze(bodyBytes)
 
-		go func() {
-			if found {
-				LogRequest(r.Host, r.URL.Path, r.Method, true, "sensitive_data")
-			} else {
-				LogRequest(r.Host, r.URL.Path, r.Method, false, "")
-			}
-		}()
+		host, path, method := r.Host, r.URL.Path, r.Method
+		patternType := ""
+		if found {
+			patternType = "sensitive_data"
+		}
+
+		logWorkerPool.Submit(LogRequest{
+			Host:        host,
+			Path:        path,
+			Method:      method,
+			Redacted:    found,
+			PatternType: patternType,
+		})
 
 		if found {
 			fmt.Printf("[GALILEU] Interceptado em %s: Dados sensíveis removidos.\n", r.Host)
@@ -77,7 +142,7 @@ func StartGuardian() {
 			r.ContentLength = int64(len(cleanBody))
 			r.Header.Set("Content-Length", fmt.Sprintf("%d", len(cleanBody)))
 		} else {
-			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 
 		return r, nil
@@ -104,7 +169,6 @@ func StartGuardian() {
 	log.Fatal(http.ListenAndServe(":9000", proxy))
 }
 
-// Função auxiliar para configurar o certificado no goproxy
 func setCA(caCert, caKey []byte) {
 	block, _ := pem.Decode(caCert)
 	if block == nil || block.Type != "CERTIFICATE" {
