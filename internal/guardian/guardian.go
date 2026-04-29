@@ -1,209 +1,128 @@
 package guardian
 
 import (
+	"bytes"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
-	"net"
+	"net/http"
 	"os"
-	"strings"
-	"unsafe"
+	"sync"
 
-	"github.com/imgk/divert-go"
+	"github.com/elazarl/goproxy"
 )
 
-const (
-	MITMListenPort = 9001
-	MinPacketSize  = 80
-	HostsFile      = "C:\\Windows\\System32\\drivers\\etc\\hosts"
-)
-
-type IPv4Header struct {
-	VersionIhl  uint8
-	Tos         uint8
-	TotalLength uint16
-	Identifier  uint16
-	FlagsFrag   uint16
-	Ttl         uint8
-	Protocol    uint8
-	Checksum    uint16
-	SourceIP    [4]byte
-	DestIP      [4]byte
-}
-
-type TCPHeader struct {
-	SrcPort    uint16
-	DstPort    uint16
-	SeqNum     uint32
-	AckNum     uint32
-	DataOffset uint8
-	Flags      uint8
-	Window     uint16
-	Checksum   uint16
-	UrgentPtr  uint16
-}
-
-var monitoringDomains = []string{
-	"opencode.ai",
-	"api.anthropic.com",
-	"api.openai.com",
-	"generativelanguage.googleapis.com",
-	"api.cohere.ai",
-	"api.cerebras.ai",
-	"api.mistral.ai",
-}
-
-func loadCertificates() (*tls.Certificate, error) {
-	cert, err := tls.LoadX509KeyPair("rootCA.pem", "rootCA-key.pem")
-	if err != nil {
-		return nil, fmt.Errorf("erro certificados: %w", err)
-	}
-	return &cert, nil
-}
-
-func StartMITMListener() error {
-	cert, err := loadCertificates()
-	if err != nil {
-		return err
-	}
-
-	tlsConfig := &tls.Config{
-		Certificates:       []tls.Certificate{*cert},
-		ServerName:         "*",
-		InsecureSkipVerify: true,
-	}
-
-	listener, err := tls.Listen("tcp", fmt.Sprintf(":%d", MITMListenPort), tlsConfig)
-	if err != nil {
-		return fmt.Errorf("listener: %w", err)
-	}
-	defer listener.Close()
-
-	fmt.Printf("[GALILEU] MITM ativo em :%d\n", MITMListenPort)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("[GALILEU] Erro: %v", err)
-			continue
-		}
-		go handleMITMConnection(conn)
-	}
-}
-
-func handleMITMConnection(clientConn net.Conn) {
-	defer clientConn.Close()
-
-	buf := make([]byte, 8192)
-	n, err := clientConn.Read(buf)
-	if err != nil {
-		return
-	}
-
-	payload := buf[:n]
-	analyzer := NewAnalyzer()
-	found, _ := analyzer.Analyze(payload)
-	if found {
-		fmt.Println("[GALILEU] Payload processado!")
-	}
-
-	host := "opencode.ai:443"
-	for _, line := range strings.Split(string(payload), "\r\n") {
-		if strings.HasPrefix(strings.ToLower(line), "host:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				host = strings.TrimSpace(parts[1]) + ":443"
-				break
-			}
-		}
-	}
-
-	upstream, err := tls.Dial("tcp", host, &tls.Config{
-		ServerName:         strings.Split(host, ":")[0],
-		InsecureSkipVerify: true,
-	})
-	if err != nil {
-		return
-	}
-	defer upstream.Close()
-
-	upstream.Write(payload)
-	resp := make([]byte, 8192)
-	m, _ := upstream.Read(resp)
-	clientConn.Write(resp[:m])
-}
-
-func getTCPHeader(packet []byte) *TCPHeader {
-	if len(packet) < 20 {
-		return nil
-	}
-	ip := (*IPv4Header)(unsafe.Pointer(&packet[0]))
-	if ip.VersionIhl>>4 != 4 {
-		return nil
-	}
-	tcpLen := int((ip.VersionIhl & 0x0F) * 4)
-	if len(packet) < tcpLen+20 {
-		return nil
-	}
-	return (*TCPHeader)(unsafe.Pointer(&packet[tcpLen]))
-}
-
-func hasRelevantPayload(packet []byte) bool {
-	tcp := getTCPHeader(packet)
-	if tcp == nil {
-		return false
-	}
-	offset := int(tcp.DataOffset>>4) * 4
-	if len(packet) <= offset {
-		return false
-	}
-	return len(packet)-offset >= MinPacketSize
-}
-
-func containsRelevantDomain(packet []byte) bool {
-	content := string(packet)
-	for _, d := range monitoringDomains {
-		if strings.Contains(content, d) {
-			return true
-		}
-	}
-	return false
+var bodyPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 0, 32768)
+	},
 }
 
 func StartGuardian() {
-	if _, err := os.Stat("rootCA.pem"); os.IsNotExist(err) {
-		log.Println("[GALILEU] Aviso: rootCA.pem nao encontrado")
-	}
+	proxy := goproxy.NewProxyHttpServer()
 
-	go func() {
-		if err := StartMITMListener(); err != nil {
-			log.Printf("[GALILEU] MITM: %v", err)
-		}
-	}()
-
-	filter := "(outbound and tcp.DstPort == 443)"
-	wd, err := divert.Open(filter, divert.LayerNetwork, 0, 0)
+	caCert, err := os.ReadFile("rootCA.pem")
 	if err != nil {
-		log.Fatal("Erro (ADMIN): ", err)
+		log.Fatalf("Erro ao ler rootCA.pem: %v", err)
 	}
-	defer wd.Close()
+	caKey, err := os.ReadFile("rootCA-key.pem")
+	if err != nil {
+		log.Fatalf("Erro ao ler rootCA-key.pem: %v", err)
+	}
+
+	setCA(caCert, caKey)
+
+	if err := InitAuditLogger(); err != nil {
+		fmt.Printf("[GALILEU] Aviso: Não foi possível iniciar auditoria: %v\n", err)
+	}
+	defer CloseAuditLogger()
 
 	analyzer := NewAnalyzer()
-	fmt.Println("[GALILEU] Ativo. Monitorando HTTPS...")
 
-	for {
-		buf := make([]byte, 1600)
-		addr := new(divert.Address)
-		n, err := wd.Recv(buf, addr)
-		if err != nil || n == 0 {
-			continue
-		}
-
-		if hasRelevantPayload(buf[:n]) && containsRelevantDomain(buf[:n]) {
-			fmt.Printf("[GALILEU] >>> Pacote capturado: %d bytes\n", n)
-			analyzer.Analyze(buf[:n])
-		}
-
-		_, _ = wd.Send(buf[:n], addr)
+	targetHosts := []string{
+		"opencode.ai",
+		"api.openai.com",
+		"api.anthropic.com",
+		"generativelanguage.googleapis.com",
+		"api.cohere.ai",
+		"api.mistral.ai",
 	}
+
+	processRequest := func(r *http.Request) (*http.Request, *http.Response) {
+		if r.Body == nil {
+			return r, nil
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return r, nil
+		}
+
+		found, cleanBody := analyzer.Analyze(body)
+
+		go func() {
+			if found {
+				LogRequest(r.Host, r.URL.Path, r.Method, true, "sensitive_data")
+			} else {
+				LogRequest(r.Host, r.URL.Path, r.Method, false, "")
+			}
+		}()
+
+		if found {
+			fmt.Printf("[GALILEU] Interceptado em %s: Dados sensíveis removidos.\n", r.Host)
+			r.Body = io.NopCloser(bytes.NewReader(cleanBody))
+			r.ContentLength = int64(len(cleanBody))
+			r.Header.Set("Content-Length", fmt.Sprintf("%d", len(cleanBody)))
+		} else {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+
+		return r, nil
+	}
+
+	for _, host := range targetHosts {
+		h := host
+		proxy.OnRequest(goproxy.DstHostIs(h)).DoFunc(
+			func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+				fmt.Printf("[DEBUG] Requisição capturada para: %s\n", r.Host)
+				return processRequest(r)
+			},
+		)
+	}
+
+	proxy.OnRequest().DoFunc(
+		func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			fmt.Printf("[DEBUG] Requisição recebida: %s %s\n", r.Method, r.Host)
+			return r, nil
+		},
+	)
+
+	fmt.Println("[GALILEU] Proxy MITM Ativo na porta 9000...")
+	log.Fatal(http.ListenAndServe(":9000", proxy))
+}
+
+// Função auxiliar para configurar o certificado no goproxy
+func setCA(caCert, caKey []byte) {
+	block, _ := pem.Decode(caCert)
+	if block == nil || block.Type != "CERTIFICATE" {
+		log.Fatalf("Erro: certificado CA inválido")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		log.Fatalf("Erro ao parsear certificado CA: %v", err)
+	}
+
+	ca, err := tls.X509KeyPair(caCert, caKey)
+	if err != nil {
+		log.Fatalf("Erro ao carregar par de chaves CA: %v", err)
+	}
+	ca.Leaf = cert
+
+	goproxy.GoproxyCa = ca
+	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
+	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
 }

@@ -1,7 +1,10 @@
 module Galileu
 
-go 1.22.2
+go 1.25.0
 
-require github.com/imgk/divert-go v0.1.0
-
-require golang.org/x/sys v0.15.0 // indirect
+require (
+	github.com/elazarl/goproxy v1.8.3 // indirect
+	golang.org/x/net v0.43.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.28.0 // indirect
+)

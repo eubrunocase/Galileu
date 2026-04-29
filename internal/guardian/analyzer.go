@@ -1,80 +1,58 @@
 package guardian
 
 import (
-	"fmt"
-	"strings"
+	"regexp"
+	"sync"
 )
 
-type SensitiveInfo struct {
-	Label   string
-	Pattern string
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return &bufferWrapper{data: make([]byte, 0, 4096)}
+	},
 }
 
-type PayloadAnalyzer struct {
-	Patterns     []SensitiveInfo
-	ZenPaths     []string
-	ProviderSNIs []string
+type bufferWrapper struct {
+	data []byte
 }
 
-func NewAnalyzer() *PayloadAnalyzer {
-	return &PayloadAnalyzer{
-		Patterns: []SensitiveInfo{
-			{Label: "Gemini_Key", Pattern: "AIzaSy"},
-			{Label: "OpenAI_Key", Pattern: "sk-"},
-			{Label: "Claude_Key", Pattern: "sk-ant-"},
-		},
-		ZenPaths: []string{
-			"/zen/v1/chat/completions",
-			"/zen/v1/messages",
-			"/zen/v1/models",
-		},
-		ProviderSNIs: []string{
-			"api.anthropic.com",
-			"api.openai.com",
-			"generativelanguage.googleapis.com",
-			"api.cohere.ai",
-			"opencode.ai",
-			"api.cerebras.ai",
-			"api.mistral.ai",
-			"ai.platform.x.ai",
-		},
+type Analyzer struct {
+	compiledPatterns []*regexp.Regexp
+	redaction        []byte
+}
+
+func NewAnalyzer() *Analyzer {
+	patterns := []string{
+		`(sk-[a-zA-Z0-9]{20,})`,
+		`(sk-proj-[a-zA-Z0-9.-]{20,})`,
+		`(sk-ant-[a-zA-Z0-9.-]{20,})`,
+		`(AIzaSy[a-zA-Z0-9_-]{35})`,
+		`(ghp_[a-zA-Z0-9]{36})`,
+		`(xox[baprs]-[a-zA-Z0-9]{10,})`,
+		`(AKIA[0-9A-Z]{16})`,
+		`(bearer\s+[a-zA-Z0-9.-]{20,})`,
+	}
+
+	compiled := make([]*regexp.Regexp, len(patterns))
+	for i, p := range patterns {
+		compiled[i] = regexp.MustCompile(p)
+	}
+
+	return &Analyzer{
+		compiledPatterns: compiled,
+		redaction:        []byte("[REDACTED_BY_GALILEU]"),
 	}
 }
 
-func (a *PayloadAnalyzer) extractSNI(payload []byte) string {
-	content := string(payload)
-	for _, sni := range a.ProviderSNIs {
-		if strings.Contains(content, sni) {
-			return sni
-		}
-	}
-	return ""
-}
+func (a *Analyzer) Analyze(data []byte) (bool, []byte) {
+	modified := false
+	result := data
 
-func (a *PayloadAnalyzer) Analyze(payload []byte) (bool, []byte) {
-	content := string(payload)
-	isSensitive := false
-	modifiedContent := content
-
-	sni := a.extractSNI(payload)
-	if sni != "" {
-		fmt.Printf("[GALILEU] Dominio detectado: %s\n", sni)
-	}
-
-	for _, path := range a.ZenPaths {
-		if strings.Contains(content, path) {
-			isSensitive = true
-			fmt.Printf("[GALILEU] Interceptado: Chamada Zen - %s\n", path)
-			break
+	for _, re := range a.compiledPatterns {
+		if re.Match(result) {
+			modified = true
+			result = re.ReplaceAll(result, a.redaction)
 		}
 	}
 
-	for _, p := range a.Patterns {
-		if strings.Contains(content, p.Pattern) {
-			isSensitive = true
-			modifiedContent = strings.ReplaceAll(modifiedContent, p.Pattern, "[REDACTED_"+p.Label+"]")
-		}
-	}
-
-	return isSensitive, []byte(modifiedContent)
+	return modified, result
 }
