@@ -30,6 +30,8 @@ func NewAnalyzer() *Analyzer {
 		`(xox[baprs]-[a-zA-Z0-9]{10,})`,
 		`(AKIA[0-9A-Z]{16})`,
 		`(bearer\s+[a-zA-Z0-9.-]{20,})`,
+		`(wJalr[a-zA-Z0-9/+=]{30,})`,
+		`(api_key[a-zA-Z0-9_]{20,})`,
 	}
 
 	compiled := make([]*regexp.Regexp, len(patterns))
