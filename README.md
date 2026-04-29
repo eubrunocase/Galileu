@@ -127,6 +127,44 @@ O arquivo `galileu_audit.log` contém um registro JSON de cada requisição:
 {"timestamp":"2026-04-29T10:05:00Z","host":"api.openai.com","path":"/v1/chat/completions","method":"POST","redacted":false,"pattern_type":""}
 ```
 
+## Comprovação de Testes
+
+Os testes foram realizados com sucesso conforme demonstrado abaixo:
+
+### 1. Arquivo `.env` com Dados Sensíveis
+
+Arquivo contendo múltiplas chaves de API simuladas para teste:
+
+![Arquivo .env](img/env.png)
+
+### 2. Terminal do Galileu (Executado como Administrador)
+
+Log de execução do proxy com interceptação das requisições:
+
+![Terminal Galileu](img/cmdLog.png)
+
+### 3. Resposta do OpenCode
+
+Resposta do ChatGPT mostrando quais dados foram detectados e redatados:
+
+![Resposta OpenCode](img/opencodeResponse.png)
+
+### Resultado dos Testes
+
+| Dados Enviados | Dados Redatados | Status |
+|----------------|-----------------|--------|
+| `sk-...` (OpenAI) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `sk-proj-...` (OpenAI Project) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `sk-ant-...` (Anthropic) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `AIzaSy...` (Google) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `ghp_...` (GitHub) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `xoxb-...` (Slack/Discord) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `AKIA...` (AWS Key) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `wJalr...` (AWS Secret) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+| `api_key...` (Generic) | ✅ `[REDACTED_BY_GALILEU]` | Detectado |
+
+O Galileu está funcionando corretamente, interceptando e sanitizando dados sensíveis antes do envio aos provedores de LLM.
+
 ## Performance
 
 O Galileu foi otimizado para performance:
