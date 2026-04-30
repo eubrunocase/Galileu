@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
-	"sync"
+	"syscall"
 )
 
 func getCertThumbprint(certPath string) (string, error) {
@@ -19,7 +20,7 @@ func getCertThumbprint(certPath string) (string, error) {
 
 	block, _ := pem.Decode(data)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return "", fmt.Errorf("arquivo de certificado inválido")
+		return "", fmt.Errorf("arquivo de certificado invalido")
 	}
 
 	hash := sha1.Sum(block.Bytes)
@@ -57,20 +58,20 @@ func certExistsInStore(certPath string) bool {
 
 func InstallCA(certPath string) error {
 	if runtime.GOOS != "windows" {
-		return fmt.Errorf("autoinstalação disponível apenas para Windows")
+		return fmt.Errorf("autoinstalacao disponivel apenas para Windows")
 	}
 
 	if _, err := os.Stat(certPath); os.IsNotExist(err) {
-		return fmt.Errorf("certificado não encontrado: %s", certPath)
+		return fmt.Errorf("certificado nao encontrado: %s", certPath)
 	}
 
 	if certExistsInStore(certPath) {
-		fmt.Println("[GALILEU] Certificado CA já está instalado no repositório.")
+		fmt.Println("[GALILEU] Certificado CA ja esta instalado no repositorio.")
 		return nil
 	}
 
 	if !isAdmin() {
-		return fmt.Errorf("privilégios de administrador necessários para instalar o certificado")
+		return fmt.Errorf("privilegios de administrador necessarios para instalar o certificado")
 	}
 
 	cmd := exec.Command("certutil", "-addstore", "-f", "Root", certPath)
@@ -85,13 +86,17 @@ func InstallCA(certPath string) error {
 
 func main() {
 	fmt.Println(`
-    #####     #      #        #####  #      ####### #     #
-    #     #   # #    #         #    #      #       #     #
-    #        #   #   #         #    #      #       #     #
-    #  #### #     #  #         #    #      #####   #     #
-    #     # #######  #         #    #      #       #     #
-    #     # #     #  #         #    #      #       #     #
-    #####  #     #  #######  #####  ###### #######  #####
+                                                                                                                                             
+                       (     (    (                 
+ (        (      )\ )  )\ ) )\ )              
+ )\ )     )\    (()/( (()/((()/(  (       (   
+(()/(  ((((_)(   /(_)) /(_))/(_)) )\      )\  
+ /(_))_ )\ _ )\ (_))  (_)) (_))  ((_)  _ ((_) 
+(_)) __|(_)_\(_)| |   |_ _|| |   | __|| | | | 
+  | (_ | / _ \  | |__  | | | |__ | _| | |_| | 
+   \___|/_/ \_\ |____||___||____||___| \___/  
+                                                   
+                       
     `)
 
 	certPath := "./rootCA.pem"
@@ -102,14 +107,17 @@ func main() {
 		return
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		guardian.StartGuardian()
-	}()
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go guardian.GracefulListen()
 
 	fmt.Println("[GALILEU] Proxy ativo na porta 9000.")
-	fmt.Println("[GALILEU] Execute 'start-opencode.bat' em outro CMD (sem admin) para iniciar o OpenCode.")
-	wg.Wait()
+	fmt.Println("[GALILEU]pressione Ctrl+C para encerrar e persistir o log de auditoria.")
+
+	<-quit
+	fmt.Println("\n[GALILEU] Encerrando...")
+	guardian.CloseGuardian()
+	guardian.CloseAuditLogger()
+	fmt.Println("[GALILEU] Log de auditoria persistido com sucesso.")
 }
