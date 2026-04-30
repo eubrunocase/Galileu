@@ -48,9 +48,7 @@ func (a *AuditLogger) Log(entry AuditEntry) {
 	a.entries = append(a.entries, entry)
 	a.count++
 
-	if a.count >= 10 {
-		a.flush()
-	}
+	go a.flush()
 }
 
 func (a *AuditLogger) flush() {
@@ -74,7 +72,7 @@ func (a *AuditLogger) Close() {
 	a.file.Close()
 }
 
-func LogRequest(host, path, method string, redacted bool, patternType string) {
+func LogAudit(host, path, method string, redacted bool, patternType string) {
 	if auditLogger == nil {
 		return
 	}
